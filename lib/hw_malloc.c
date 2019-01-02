@@ -3,40 +3,6 @@
 #define header_size 24
 #define mmap_threshold 32*1024
 
-struct chunk_header* get_uchunk_header(struct chunk_header* add_pos)
-{
-    struct chunk_header* re_header = (struct chunk_header*)((void*)add_pos+add_pos->current_chunk_size);
-    if((void*)re_header >= (void*)Heap->start_brk+(64*1024))
-        re_header = (void*)re_header-(64*1024);
-    return re_header;
-}
-
-struct chunk_header* get_lchunk_header(struct chunk_header* add_pos)
-{
-    struct chunk_header* re_header = (struct chunk_header*)((void*)add_pos-add_pos->prev_chunk_size);
-    if((void*)re_header < (void*)Heap->start_brk)
-        re_header = (void*)re_header+(64*1024);
-    return re_header;
-}
-
-void renew_upper_chunk(struct chunk_header* entry)
-{
-    struct chunk_header* upper_chunk = get_uchunk_header(entry);
-    upper_chunk->prev_chunk_size = entry->current_chunk_size;
-    upper_chunk->allocated_flag = 0;
-    upper_chunk->mmap_bit = 0;
-}
-
-void list_del(struct chunk_header* del)
-{
-    //printf("into list_del\n");
-    del->next->prev = del->prev;
-    del->prev->next = del->next;
-    del->next = NULL;
-    del->prev = NULL;
-    //printf("end list_del\n");
-}
-
 int ppow(int f, int s)
 {
     int result=2;
@@ -72,11 +38,10 @@ void add_node(struct heap_t* Heap, struct chunk_header* entry)
 {
     int bin_index = get_bin_index(entry->current_chunk_size);
     //printf("----------- %d\n",bin_index);
-    renew_upper_chunk(entry);
     struct chunk_header* listptr;
     struct chunk_header* bin_head = Heap->BIN[bin_index];
 
-    for(listptr = bin_head->next; ; listptr=listptr->next) {
+    for(listptr = bin_head->next; listptr->next!=NULL; listptr=listptr->next) {
         if(entry->current_chunk_size >= listptr->current_chunk_size) {
             struct chunk_header* new_lst = entry;
             struct chunk_header* pprev = listptr->prev;
@@ -92,25 +57,40 @@ void add_node(struct heap_t* Heap, struct chunk_header* entry)
 
 /*-----------------only used in heap free------------------------------------------------*/
 
-int is_allocated(struct chunk_header* entry)
+struct chunk_header* get_uchunk_header(struct chunk_header* add_pos)
 {
-    struct chunk_header* upper = get_uchunk_header(entry);
-    return upper->allocated_flag;
+    struct chunk_header* uHeader = (struct chunk_header*)((void*)add_pos+add_pos->current_chunk_size);
+    if((void*)uHeader >= get_start_sbrk()+(64*1024))
+        uHeader = (void*)uHeader-(64*1024);
+    return uHeader;
+}
+
+struct chunk_header* get_lchunk_header(struct chunk_header* add_pos)
+{
+    struct chunk_header* lHeader = (struct chunk_header*)((void*)add_pos-add_pos->prev_chunk_size);
+    if((void*)lHeader < get_start_sbrk())
+        lHeader = (void*)lHeader+(64*1024);
+    return lHeader;
 }
 
 void merge(struct chunk_header* upper, struct chunk_header* lower)
 {
-    list_del(upper);
-    list_del(lower);
-    renew_upper_chunk(upper);
+    upper->next->prev = upper->prev;
+    upper->prev->next = upper->next;
+    upper->next = NULL;
+    upper->prev = NULL;
+
+    lower->next->prev = lower->prev;
+    lower->prev->next = lower->next;
+    lower->next = NULL;
+    lower->prev = NULL;
+
     lower->current_chunk_size += upper->current_chunk_size;
-    renew_upper_chunk(lower);
     add_node(Heap, lower);
 }
 
 void put_into_bin(struct chunk_header* free_chunk)
 {
-    renew_upper_chunk(free_chunk);
     add_node(Heap, free_chunk);
     struct chunk_header* upper = get_uchunk_header(free_chunk);
     struct chunk_header* upper2 = get_uchunk_header(upper);
@@ -167,32 +147,6 @@ void bin_init(struct chunk_header** bin)
     (*bin)->mmap_bit = 0;
 }
 
-void heap_initial(struct heap_t** Heap)
-{
-    *Heap = (struct heap_t*)malloc(sizeof(struct heap_t));
-    (*Heap) -> next = NULL;
-    (*Heap) -> start_brk = sbrk(64*1024);
-    for(int i=0; i<=10; i++) {
-        bin_init((&(*Heap)->BIN[i]));
-    }
-    struct chunk_header* entry = (struct chunk_header*)(*Heap)->start_brk;
-    chunk_header_init(entry, 64*1024, 1,0,0);
-    add_node(*Heap, entry);
-}
-
-/*struct chunk_header* mmap_alloc_list(struct heap_t* Heap, struct chunk_header* entry)
-{
-    struct chunk_header* listptr;
-    struct chunk_header* new_lst = entry;
-    struct chunk_header* pprev = entry->prev;
-
-    listptr->next=entry;
-    pprev=listptr;
-    listptr->prev=pprev;
-    pprev->next=listptr;
-    return new_lst;
-}*/
-
 void mmap_init(struct heap_t** Heap, size_t bytes)
 {
     *Heap = (struct heap_t*)malloc(sizeof(struct heap_t));
@@ -200,7 +154,6 @@ void mmap_init(struct heap_t** Heap, size_t bytes)
     (*Heap) -> start_brk = sbrk(64*1024);
     struct chunk_header* entry = (struct chunk_header*)(*Heap)->start_brk;
     chunk_header_init(entry, 64*1024, 1,0,1);
-    //mmap_alloc_list(*Heap,entry);
 }
 
 void split(struct chunk_header* org_chunk, size_t bytes)
@@ -213,7 +166,6 @@ void split(struct chunk_header* org_chunk, size_t bytes)
     } else {
         chunk_header_init(rest_chunk,org_chunk->current_chunk_size-bytes,bytes,1,0);
         chunk_header_init(org_chunk,bytes,org_chunk->prev_chunk_size,org_chunk->allocated_flag,0);
-        renew_upper_chunk(rest_chunk);
     }
     add_node(Heap, rest_chunk);
 }
@@ -246,9 +198,22 @@ void *hw_malloc(size_t bytes)
     //heap allocation
     else {
         //printf("into heap allocation\n");
-        if(Heap==NULL)	heap_initial(&Heap);
+        if(Heap==NULL) {
+            Heap = (struct heap_t*)malloc(sizeof(struct heap_t));
+            Heap -> next = NULL;
+            Heap -> start_brk = sbrk(64*1024);
+            for(int i=0; i<=10; i++) {
+                bin_init((&(Heap)->BIN[i]));
+            }
+            struct chunk_header* entry = (struct chunk_header*)Heap->start_brk;
+            chunk_header_init(entry, 64*1024, 1,0,0);
+            add_node(Heap, entry);
+        }
         struct chunk_header* found = get_best_fit(Heap,bytes);
-        list_del(found);
+        found->next->prev = found->prev;
+        found->prev->next = found->next;
+        found->next = NULL;
+        found->prev = NULL;
         //printf("org_size: %lld\n",found->current_chunk_size);
         //printf("chunk_size: %ld\n",bytes+header_size);
         split(found, bytes);
@@ -272,7 +237,11 @@ int hw_free(void *mem)
     //heap free method
     else {
         //printf("into heap free\n");
-        if(is_allocated(free_chunk)==1) {
+        struct chunk_header* free = (struct chunk_header*)((void*)free_chunk+free_chunk->current_chunk_size);
+        if((void*)free >= (void*)Heap->start_brk+(64*1024))
+            free = (void*)free-(64*1024);
+
+        if((free->allocated_flag) == 1) {
             put_into_bin(free_chunk);
             return 1;
         }
